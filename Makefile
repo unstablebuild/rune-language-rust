@@ -149,7 +149,7 @@ $(TAR): $(LIB) sign
 
 # Verify release-tarball properties (no .go source leaks, etc).
 test: $(TAR)
-	TAR=$(TAR) ./scripts/test.sh
+	TAR=$(TAR) NOTARIZE_ZIP=$(NOTARIZE_ZIP) ./scripts/test.sh
 
 $(DIST_TARGETS): dist-%:
 	@env=$$(echo $* | cut -d- -f1); \
