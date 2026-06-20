@@ -3,3 +3,4 @@
 *.swp
 *.rswp
 pkg/
+llvm.tar.xz
