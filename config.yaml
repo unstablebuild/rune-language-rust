@@ -1,0 +1,32 @@
+gui:
+  env:
+    RUSTUP_HOME: '$RUNE_DATADIR/lib/$RUNE_PKG_ID/lib'
+    CARGO_HOME:  '$RUNE_DATADIR/lib/$RUNE_PKG_ID/lib'
+extensions:
+  rust:
+    path: '$RUNE_DATADIR/bin/extension_rust'
+    config:
+      lsp_path: ""
+debugger:
+  rust:
+    command: "lldb-dap --connection connect://{addr}"
+    adapter_id: "lldb"
+    launch:
+      request: "launch"
+      type: "lldb"
+      stopOnEntry: "false"
+    attach:
+      request: "attach"
+      type: "lldb"
+editor:
+  icons:
+    .rs: 󱘗
+  comments:
+    rust:
+      line:
+        - "//"
+      block:
+        - "/*"
+        - "*/"
+  indents:
+    rust: "spaces"

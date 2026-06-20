@@ -1,0 +1,9 @@
+[submodule "tree-sitter-rust"]
+	path = tree-sitter-rust
+	url = git@github.com:tree-sitter/tree-sitter-rust.git
+[submodule "nvim-treesitter"]
+	path = nvim-treesitter
+	url = git@github.com:nvim-treesitter/nvim-treesitter.git
+[submodule "rune"]
+	path = rune
+	url = git@git.unstable.build:unstablebuild/rune.git
