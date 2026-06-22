@@ -2,5 +2,7 @@
 *.zip
 *.swp
 *.rswp
+.pkg.stamp
+.toolchain.*.stamp
 pkg/
 llvm.tar.xz

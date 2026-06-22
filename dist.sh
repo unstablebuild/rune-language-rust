@@ -1,6 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
 GIT_REMOTE_URL=$(git remote get-url origin)
 GIT_AUTHOR_EMAIL=$(git log -1 --pretty=format:'%ae')
-GIT_TAG=$(git describe --tags --dirty)
 GIT_HEAD=$(git rev-parse HEAD)
 BLUE_RELEASE_TAR=rust.tar.gz
 : "${BLUECTL_CONFIG_DIR:?BLUECTL_CONFIG_DIR is not set. Use the dist-<env>-<os>-<arch> make targets (e.g. dist-prod-darwin-arm64) so the bluectl project-id is pinned to the right environment.}"
@@ -11,16 +13,28 @@ case "$ARCH" in
 	x86_64) ARCH=amd64 ;;
 	aarch64) ARCH=arm64 ;;
 esac
+
+if [[ ! -f "$BLUE_RELEASE_TAR" ]]; then
+    echo "error: release tarball '$BLUE_RELEASE_TAR' does not exist; run make $BLUE_RELEASE_TAR first" >&2
+    exit 1
+fi
+
+if [[ -z "$(git tag -l)" ]]; then
+    echo "error: no git tags found; fetch tags or create a release tag before running dist" >&2
+    exit 1
+fi
+
+GIT_TAG=$(git describe --tags --dirty)
 BLUE_RELEASE_TAG="$GIT_TAG"
 
 echo "Pushing tarball for OS '$OS' and arch '$ARCH'";
 
-if [[ -z "${BLUE_PGP_KEY}" ]]; then
+if [[ -z "${BLUE_PGP_KEY:-}" ]]; then
     echo "BLUE_PGP_KEY is not set. See bluectl release upload -h for help."
 	exit 1;
 fi
 
-if [[ -z "${BLUE_PGP_KEYRING}" ]]; then
+if [[ -z "${BLUE_PGP_KEYRING:-}" ]]; then
     echo "BLUE_PGP_KEYRING is not set. See bluectl release upload -h for help."
 	exit 1;
 fi
@@ -38,13 +52,12 @@ blue_release_dist() {
 		-d git-tag=$GIT_TAG -d git-head=$GIT_HEAD \
 		-d git-log="$GIT_LOG" \
 		-y \
-		-k $BLUE_PGP_KEY \
-		-r $BLUE_PGP_KEYRING rust $BLUE_RELEASE_TAG $BLUE_RELEASE_TAR
+		-k "$BLUE_PGP_KEY" \
+		-r "$BLUE_PGP_KEYRING" rust "$BLUE_RELEASE_TAG" "$BLUE_RELEASE_TAR"
 }
 
 # check if HEAD is tagged; if not, use annotate with range between latest tag and HEAD
-git describe --contains 2>&1 1> /dev/null;
-if [ $? -ne 0 ];
+if ! git describe --contains >/dev/null 2>&1;
 then
 	GIT_LOG_RANGE="$(git tag -l --sort=-version:refname | head -1)...HEAD";
 	printf "using git range between latest tag and latest tag + added commits: $GIT_LOG_RANGE:";

@@ -1,8 +1,10 @@
-SRC=tree-sitter-rust rune
-LIB=$(wildcard pkg/**/*) $(wildcard pkg/*) pkg
+SRC=tree-sitter-rust nvim-treesitter rune
+PKG_STAMP=.pkg.stamp
+TOOLCHAIN_STAMP=.toolchain.$(TARGET_OS)-$(TARGET_ARCH).stamp
 TAR=rust.tar.gz
 NOTARIZE_ZIP=rust-notarize.zip
-GTAR=gtar
+GTAR=$(if $(filter Darwin,$(UNAME)),gtar,tar)
+TAR_WILDCARDS=$(if $(filter Darwin,$(UNAME)),,--wildcards)
 CODESIGN_IDENTITY=Developer ID Application: Unstable Build, LLC. (YYZRWD888J)
 NOTARY_PROFILE=notary-profile
 UNAME=$(shell uname)
@@ -53,13 +55,17 @@ DIST_TARGETS := \
 	dist-staging-darwin-arm64 dist-staging-darwin-amd64 \
 	dist-staging-linux-arm64  dist-staging-linux-amd64
 
-.PHONY: $(DIST_TARGETS) clean sign notarize notary-credentials toolchain test
+.PHONY: $(DIST_TARGETS) clean sign notarize notary-credentials toolchain test pkg
 default: $(TAR)
+
+pkg: $(PKG_STAMP)
+
+toolchain: $(TOOLCHAIN_STAMP)
 
 # Stage prebuilt rustup-init + rust-analyzer into pkg/bin and extract lldb-dap
 # (+ its lldb/LLVM shared libs) from the prebuilt LLVM release into pkg/bin +
 # pkg/lib, for the target os/arch.
-toolchain:
+$(TOOLCHAIN_STAMP): Makefile
 	@mkdir -p pkg/bin pkg/lib
 	# rustup-init (single static binary; the extension runs it on first launch).
 	wget -O pkg/bin/rustup-init https://static.rust-lang.org/rustup/dist/$(RUST_TRIPLE)/rustup-init
@@ -78,6 +84,7 @@ toolchain:
 		echo "skip lldb-dap: no official macOS-amd64 LLVM $(LLVM_VERSION) prebuilt"; \
 	else \
 		wget -O llvm.tar.xz https://github.com/llvm/llvm-project/releases/download/llvmorg-$(LLVM_VERSION)/$(LLVM_ASSET); \
+		rm -rf llvm-extract; \
 		mkdir -p llvm-extract; \
 		: "Extract only lldb-dap + the lldb/LLVM shared libs it links. Verified"; \
 		: "on macOS arm64 (LLVM 22.1.8): lldb-dap needs ONLY @rpath/liblldb.<ver>.dylib,"; \
@@ -89,10 +96,13 @@ toolchain:
 		: "lldb-dap must extract (fail the build if absent); the lib patterns are"; \
 		: "OS-specific, so run each in its own tar tolerant of a no-match (tar errors"; \
 		: "when a pattern matches nothing)."; \
-		tar -xJf llvm.tar.xz -C llvm-extract --strip-components=1 '*/bin/lldb-dap'; \
-		tar -xJf llvm.tar.xz -C llvm-extract --strip-components=1 '*/lib/liblldb.*dylib' 2>/dev/null || true; \
-		tar -xJf llvm.tar.xz -C llvm-extract --strip-components=1 '*/lib/liblldb.so*'   2>/dev/null || true; \
-		tar -xJf llvm.tar.xz -C llvm-extract --strip-components=1 '*/lib/libLLVM.so*'   2>/dev/null || true; \
+		tar -xJf llvm.tar.xz $(TAR_WILDCARDS) -C llvm-extract --strip-components=1 '*/bin/lldb-dap'; \
+		if [ "$(TARGET_OS)" = "darwin" ]; then \
+			tar -xJf llvm.tar.xz $(TAR_WILDCARDS) -C llvm-extract --strip-components=1 '*/lib/liblldb.*dylib' 2>/dev/null || true; \
+		else \
+			tar -xJf llvm.tar.xz $(TAR_WILDCARDS) -C llvm-extract --strip-components=1 '*/lib/liblldb.so*' 2>/dev/null || true; \
+			tar -xJf llvm.tar.xz $(TAR_WILDCARDS) -C llvm-extract --strip-components=1 '*/lib/libLLVM.so*' 2>/dev/null || true; \
+		fi; \
 		cp llvm-extract/bin/lldb-dap pkg/bin/lldb-dap; \
 		cp -a llvm-extract/lib/liblldb.*dylib pkg/lib/ 2>/dev/null || true; \
 		cp -a llvm-extract/lib/liblldb.so* pkg/lib/ 2>/dev/null || true; \
@@ -100,8 +110,9 @@ toolchain:
 		chmod +x pkg/bin/lldb-dap; \
 		rm -rf llvm.tar.xz llvm-extract; \
 	fi
+	@touch $(TOOLCHAIN_STAMP)
 
-$(LIB): $(SRC) toolchain
+$(PKG_STAMP): $(SRC) config.yaml Makefile $(TOOLCHAIN_STAMP)
 	@mkdir -p pkg/bin pkg/lib
 ifeq ($(HOST_OS),darwin)
 	cd tree-sitter-rust && cc -o parser.so -I./src src/*.c -Os -bundle -arch arm64 -arch x86_64
@@ -115,9 +126,10 @@ endif
 	cp nvim-treesitter/queries/rust/folds.scm pkg/lib
 	cd rune && CGO_ENABLED=$(CGO_ENABLED) GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH) go build -o $(PWD)/pkg/bin/extension_rust ./cmd/extension_rust
 	cp config.yaml pkg
+	@touch $(PKG_STAMP)
 
 ifeq ($(UNAME),Darwin)
-sign: $(LIB)
+sign: $(PKG_STAMP)
 	codesign --force --options runtime --sign "$(CODESIGN_IDENTITY)" pkg/bin/rustup-init
 	codesign --force --options runtime --sign "$(CODESIGN_IDENTITY)" pkg/bin/rust-analyzer
 	codesign --force --options runtime --sign "$(CODESIGN_IDENTITY)" pkg/bin/extension_rust
@@ -137,14 +149,14 @@ $(NOTARIZE_ZIP): sign
 notarize: $(NOTARIZE_ZIP)
 	xcrun notarytool submit $(NOTARIZE_ZIP) --keychain-profile "$(NOTARY_PROFILE)" --wait
 else
-sign: $(LIB)
+sign: $(PKG_STAMP)
 	@echo "Skipping codesign (not on macOS)"
 
 notarize: sign
 	@echo "Skipping notarization (not on macOS)"
 endif
 
-$(TAR): $(LIB) sign
+$(TAR): $(PKG_STAMP) sign
 	cd pkg && $(GTAR) --no-xattrs --no-acls -czvf ../$(TAR) .
 
 # Verify release-tarball properties (no .go source leaks, etc).
@@ -155,6 +167,7 @@ $(DIST_TARGETS): dist-%:
 	@env=$$(echo $* | cut -d- -f1); \
 	 os=$$(echo $*  | cut -d- -f2); \
 	 arch=$$(echo $* | cut -d- -f3); \
+	 set -e; \
 	 if [ "$$os" != "$(HOST_OS)" ]; then \
 	   echo "error: $@ targets OS '$$os' but host OS is '$(HOST_OS)'; build $$os releases on a $$os machine" >&2; \
 	   exit 1; \
@@ -170,5 +183,6 @@ notary-credentials:
 clean:
 	rm -rf $(TAR)
 	rm -rf $(NOTARIZE_ZIP)
+	rm -rf $(PKG_STAMP) .toolchain.*.stamp
 	rm -rf pkg/
 	rm -rf llvm.tar.xz llvm-extract ra.gz
