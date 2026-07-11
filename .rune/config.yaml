@@ -1,0 +1,4 @@
+extensions:
+  rune-agent:
+    config:
+      force_builtin_tools: true
