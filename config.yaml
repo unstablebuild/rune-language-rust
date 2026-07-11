@@ -1,7 +1,8 @@
 gui:
   env:
-    RUSTUP_HOME: '$RUNE_DATADIR/lib/$RUNE_PKG_ID/lib'
-    CARGO_HOME:  '$RUNE_DATADIR/lib/$RUNE_PKG_ID/lib'
+    RUSTUP_HOME: '$RUNE_DATADIR/rust/rustup'
+    CARGO_HOME:  '$RUNE_DATADIR/rust/cargo'
+    PATH:        '$RUNE_DATADIR/rust/cargo/bin:$RUNE_DATADIR/bin:$PATH'
 extensions:
   rust:
     path: '$RUNE_DATADIR/bin/extension_rust'
