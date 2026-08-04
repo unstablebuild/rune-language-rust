@@ -10,7 +10,12 @@ extensions:
       lsp_path: ""
 debugger:
   rust:
-    command: "lldb-dap --connection connect://{addr}"
+    # Invoked by package-local path, not through $RUNE_DATADIR/bin: the shared
+    # bin copy collides with rune-language-zig's lldb-dap and its
+    # @loader_path/../lib rpath does not resolve there. Inside the package dir,
+    # bin/ and lib/ are siblings, so liblldb loads. lldb-dap has no connect://
+    # scheme; Rune binds the socket and dials the adapter, so it must listen.
+    command: '$RUNE_DATADIR/lib/$RUNE_PKG_ID/bin/lldb-dap --connection listen://{addr}'
     adapter_id: "lldb"
     launch:
       request: "launch"
