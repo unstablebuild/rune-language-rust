@@ -12,7 +12,11 @@ UNAME=$(shell uname)
 # Pinned prebuilt toolchain versions (downloaded per target os/arch). No Rust
 # toolchain is bundled; rustup provisions it on first run, confined to
 # $RUNE_DATADIR/lib/$RUNE_PKG_ID via config.yaml gui.env (RUSTUP_HOME/CARGO_HOME).
-RUST_ANALYZER_VERSION=2026-06-15
+# rust-analyzer is NOT downloaded: it is built from the rust-analyzer submodule
+# (pinned to an upstream release tag) with patches/*.patch applied, because the
+# upstream prebuilts lack fixes we depend on. This means the build host needs a
+# cargo/rustc >= the submodule's rust-version, plus the target std via
+# `rustup target add`.
 # lldb-dap is extracted from the official prebuilt LLVM release. macOS x86_64
 # prebuilts stopped at LLVM 19, so darwin-amd64 lldb-dap is intentionally NOT
 # staged here (see toolchain target); arm64 macOS + both linux arches are.
@@ -39,6 +43,12 @@ RUST_OS_linux=unknown-linux-gnu
 RUST_OS=$(RUST_OS_$(TARGET_OS))
 RUST_TRIPLE=$(RUST_ARCH)-$(RUST_OS)
 
+# Cross-arch cargo builds need an explicit linker for the target triple. On
+# macOS the default clang cross-links fine (-arch), so only linux needs this.
+RUST_TRIPLE_ENV=$(shell echo $(RUST_TRIPLE) | tr 'a-z-' 'A-Z_')
+CARGO_CROSS_ENV=$(if $(filter linux,$(TARGET_OS)),$(if $(CROSS),CARGO_TARGET_$(RUST_TRIPLE_ENV)_LINKER=$(CC) CC_$(subst -,_,$(RUST_TRIPLE))=$(CC)))
+RA_PATCHES=$(wildcard patches/*.patch)
+
 # LLVM release asset naming (different per OS).
 LLVM_ARCH_amd64_linux=X64
 LLVM_ARCH_arm64_linux=ARM64
@@ -62,19 +72,30 @@ pkg: $(PKG_STAMP)
 
 toolchain: $(TOOLCHAIN_STAMP)
 
-# Stage prebuilt rustup-init + rust-analyzer into pkg/bin and extract lldb-dap
-# (+ its lldb/LLVM shared libs) from the prebuilt LLVM release into pkg/bin +
-# pkg/lib, for the target os/arch.
-$(TOOLCHAIN_STAMP): Makefile
+# Stage prebuilt rustup-init into pkg/bin, build our patched rust-analyzer, and
+# extract lldb-dap (+ its lldb/LLVM shared libs) from the prebuilt LLVM release
+# into pkg/bin + pkg/lib, for the target os/arch.
+$(TOOLCHAIN_STAMP): Makefile $(RA_PATCHES)
 	@mkdir -p pkg/bin pkg/lib
 	# rustup-init (single static binary; the extension runs it on first launch).
 	wget -O pkg/bin/rustup-init https://static.rust-lang.org/rustup/dist/$(RUST_TRIPLE)/rustup-init
 	chmod +x pkg/bin/rustup-init
-	# rust-analyzer (gzip-compressed single binary).
-	wget -O ra.gz https://github.com/rust-lang/rust-analyzer/releases/download/$(RUST_ANALYZER_VERSION)/rust-analyzer-$(RUST_TRIPLE).gz
-	gunzip -c ra.gz > pkg/bin/rust-analyzer
+	# rust-analyzer: built from the submodule (pinned to an upstream release tag)
+	# with patches/*.patch applied. Patches are applied in place and skipped when
+	# already present, so repeated builds reuse the cargo target dir.
+	git submodule update --init rust-analyzer
+	@cd rust-analyzer && for p in $(PWD)/$(RA_PATCHES); do \
+		if git apply --reverse --check "$$p" >/dev/null 2>&1; then \
+			echo "already applied: $$p"; \
+		else \
+			echo "applying: $$p"; \
+			git apply "$$p"; \
+		fi; \
+	done
+	rustup target add $(RUST_TRIPLE)
+	cd rust-analyzer && $(CARGO_CROSS_ENV) cargo build --release --target $(RUST_TRIPLE) -p rust-analyzer --bin rust-analyzer
+	cp rust-analyzer/target/$(RUST_TRIPLE)/release/rust-analyzer pkg/bin/rust-analyzer
 	chmod +x pkg/bin/rust-analyzer
-	rm -f ra.gz
 	# lldb-dap: extract only bin/lldb-dap + the liblldb/libLLVM shared libs it
 	# links from the ~1.5GB prebuilt LLVM tarball. macOS-amd64 has no official
 	# prebuilt (LLVM>19), so it is skipped; Track D handles the runtime fallback.
@@ -185,4 +206,4 @@ clean:
 	rm -rf $(NOTARIZE_ZIP)
 	rm -rf $(PKG_STAMP) .toolchain.*.stamp
 	rm -rf pkg/
-	rm -rf llvm.tar.xz llvm-extract ra.gz
+	rm -rf llvm.tar.xz llvm-extract

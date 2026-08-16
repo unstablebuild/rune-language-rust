@@ -1,0 +1,88 @@
+Gate native semantic diagnostics on build data / proc-macros having been
+fetched, not on them being missing.
+
+The upstream condition asserts `last_op_result().is_none()`, which is the
+inverse of the intent documented right above it ("have finished fetching the
+build data once"). With `cargo.buildScripts.enable` or `procMacro.enable` on
+(the defaults, and what config.yaml ships), `fetch_semantic` flips to false as
+soon as the first build-data/proc-macro fetch completes, so rust-analyzer only
+ever publishes syntax diagnostics and type errors never reach the editor.
+
+Upstream as of 2026-08-10.1 still carries the bug; drop this patch once it is
+fixed upstream.
+diff --git a/crates/rust-analyzer/src/main_loop.rs b/crates/rust-analyzer/src/main_loop.rs
+index 628e708c6a..3a376a8972 100644
+--- a/crates/rust-analyzer/src/main_loop.rs
++++ b/crates/rust-analyzer/src/main_loop.rs
+@@ -692,10 +692,10 @@ impl GlobalState {
+                 let fetch_semantic = self.vfs_done
+                     && self.fetch_workspaces_queue.last_op_result().is_some()
+                     && (!self.config.run_build_scripts(None)
+-                        || (self.fetch_build_data_queue.last_op_result().is_none()
++                        || (self.fetch_build_data_queue.last_op_result().is_some()
+                             && !self.fetch_build_data_queue.op_in_progress()))
+                     && (!self.config.expand_proc_macros()
+-                        || (self.fetch_proc_macros_queue.last_op_result().is_none()
++                        || (self.fetch_proc_macros_queue.last_op_result().is_some()
+                             && !self.fetch_proc_macros_queue.op_in_progress()));
+                 move |sender| {
+                     // We aren't observing the semantics token cache here
+diff --git a/crates/rust-analyzer/tests/slow-tests/main.rs b/crates/rust-analyzer/tests/slow-tests/main.rs
+index b91bde8428..9b4dc551e0 100644
+--- a/crates/rust-analyzer/tests/slow-tests/main.rs
++++ b/crates/rust-analyzer/tests/slow-tests/main.rs
+@@ -956,6 +956,54 @@ fn main() {{}}
+     assert!(elapsed.as_millis() < 2000, "typing enter took {elapsed:?}");
+ }
+ 
++#[test]
++fn publishes_semantic_diagnostics_with_build_scripts_and_proc_macros_enabled() {
++    if skip_slow_tests() {
++        return;
++    }
++
++    let server = Project::with_fixture(
++        r#"
++//- /Cargo.toml
++[package]
++name = "foo"
++version = "0.0.0"
++edition = "2021"
++
++//- /src/main.rs
++fn main() {}
++"#,
++    )
++    .with_config(serde_json::json!({
++        "cargo": {
++            "buildScripts": { "enable": true },
++        },
++        "procMacro": { "enable": true },
++        // Make sure flycheck cannot be the one producing the diagnostic below.
++        "checkOnSave": false,
++    }))
++    .server()
++    .wait_until_workspace_is_loaded();
++
++    // This version of the file only exists as an overlay, so `cargo check` could not see it anyway.
++    server.notification::<DidOpenTextDocument>(DidOpenTextDocumentParams {
++        text_document: TextDocumentItem {
++            uri: server.doc_id("src/main.rs").uri,
++            language_id: "rust".to_owned(),
++            version: 0,
++            text: "fn main() {\n    let _x: u32 = \"oops\";\n}\n".to_owned(),
++        },
++    });
++
++    let diagnostics = server.wait_for_diagnostics();
++    assert!(
++        diagnostics.diagnostics.iter().any(|d| d.source.as_deref() == Some("rust-analyzer")
++            && d.code == Some(lsp_types::NumberOrString::String("E0308".to_owned()))),
++        "expected a native semantic diagnostic, got: {:?}",
++        diagnostics.diagnostics
++    );
++}
++
+ #[test]
+ fn preserves_dos_line_endings() {
+     if skip_slow_tests() {

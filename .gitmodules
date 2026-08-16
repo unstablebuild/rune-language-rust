@@ -7,3 +7,10 @@
 [submodule "rune"]
 	path = rune
 	url = git@git.unstable.build:unstablebuild/rune.git
+[submodule "rust-analyzer"]
+	path = rust-analyzer
+	url = git@github.com:rust-lang/rust-analyzer.git
+	# The build applies patches/*.patch in place, so the work tree is always
+	# dirty; without this, `git describe --dirty` in dist.sh would tag releases
+	# as -dirty.
+	ignore = dirty
