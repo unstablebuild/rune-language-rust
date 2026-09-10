@@ -6,7 +6,7 @@
 	url = git@github.com:nvim-treesitter/nvim-treesitter.git
 [submodule "rune"]
 	path = rune
-	url = git@git.unstable.build:unstablebuild/rune.git
+	url = git@github.com:unstablebuild/rune.git
 [submodule "rust-analyzer"]
 	path = rust-analyzer
 	url = git@github.com:rust-lang/rust-analyzer.git
