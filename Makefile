@@ -82,10 +82,12 @@ $(TOOLCHAIN_STAMP): Makefile $(RA_PATCHES)
 	chmod +x pkg/bin/rustup-init
 	# rust-analyzer: built from the submodule (pinned to an upstream release tag)
 	# with patches/*.patch applied. Patches are applied in place and skipped when
-	# already present, so repeated builds reuse the cargo target dir.
+	# already present, so repeated builds reuse the cargo target dir. Use minimal
+	# context for the reverse check: extra local edits near a patched hunk must
+	# not cause an already-applied patch to be applied a second time.
 	git submodule update --init rust-analyzer
 	@cd rust-analyzer && for p in $(PWD)/$(RA_PATCHES); do \
-		if git apply --reverse --check "$$p" >/dev/null 2>&1; then \
+		if git apply --reverse --check -C0 "$$p" >/dev/null 2>&1; then \
 			echo "already applied: $$p"; \
 		else \
 			echo "applying: $$p"; \
