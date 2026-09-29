@@ -28,11 +28,21 @@ TARGET_OS=$(HOST_OS)
 TARGET_ARCH?=$(HOST_ARCH)
 
 CROSS=$(filter-out $(HOST_ARCH),$(TARGET_ARCH))
-CGO_ENABLED=$(if $(CROSS),0,1)
 
 GNU_TRIPLE_amd64=x86_64-linux-gnu
 GNU_TRIPLE_arm64=aarch64-linux-gnu
 CC=$(if $(CROSS),$(GNU_TRIPLE_$(TARGET_ARCH))-gcc,gcc)
+
+# The extension imports cgo-backed tree-sitter bindings even when cross-built.
+# macOS clang targets the other architecture with -arch; Linux uses the target
+# GNU cross-compiler, also used for the tree-sitter parser below.
+CLANG_ARCH_amd64=x86_64
+CLANG_ARCH_arm64=arm64
+ifeq ($(HOST_OS),darwin)
+EXT_CC=clang $(if $(CROSS),-arch $(CLANG_ARCH_$(TARGET_ARCH)),)
+else
+EXT_CC=$(CC)
+endif
 
 # Rust target-triple naming for rust-analyzer / rustup-init assets.
 RUST_ARCH_amd64=x86_64
@@ -147,7 +157,8 @@ endif
 	cp nvim-treesitter/queries/rust/indents.scm pkg/lib
 	cp nvim-treesitter/queries/rust/locals.scm pkg/lib
 	cp nvim-treesitter/queries/rust/folds.scm pkg/lib
-	cd rune && CGO_ENABLED=$(CGO_ENABLED) GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH) go build -o $(PWD)/pkg/bin/extension_rust ./cmd/extension_rust
+	cd rune && CGO_ENABLED=1 CC="$(EXT_CC)" GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH) \
+		go build -o $(PWD)/pkg/bin/extension_rust ./cmd/extension_rust
 	cp config.yaml pkg
 	@touch $(PKG_STAMP)
 
