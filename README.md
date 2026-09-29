@@ -1,5 +1,12 @@
 # Rust language package
 
+This package is for Rune maintainers only. You can install rust in Rune with the following
+command from your `console`:
+
+```
+pkg install rust
+```
+
 This repo builds the Rune Rust language package (`rust.tar.gz`) and publishes it with
 [`bluectl`](https://github.com/unstablebuild/blue). Releases cover macOS (`darwin`) and
 Linux, each on `arm64` and `amd64`, in `staging` and `prod`.
