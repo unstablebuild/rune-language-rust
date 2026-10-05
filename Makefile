@@ -2,12 +2,9 @@ SRC=tree-sitter-rust nvim-treesitter rune
 PKG_STAMP=.pkg.stamp
 TOOLCHAIN_STAMP=.toolchain.$(TARGET_OS)-$(TARGET_ARCH).stamp
 TAR=rust.tar.gz
-NOTARIZE_ZIP=rust-notarize.zip
+UNAME=$(shell uname)
 GTAR=$(if $(filter Darwin,$(UNAME)),gtar,tar)
 TAR_WILDCARDS=$(if $(filter Darwin,$(UNAME)),,--wildcards)
-CODESIGN_IDENTITY=Developer ID Application: Unstable Build, LLC. (YYZRWD888J)
-NOTARY_PROFILE=notary-profile
-UNAME=$(shell uname)
 
 # Pinned prebuilt toolchain versions (downloaded per target os/arch). No Rust
 # toolchain is bundled; rustup provisions it on first run, confined to
@@ -22,26 +19,26 @@ UNAME=$(shell uname)
 # staged here (see toolchain target); arm64 macOS + both linux arches are.
 LLVM_VERSION=22.1.8
 
+# Oldest supported platforms (docs.rune.build Prerequisites). Toolchains default
+# to the build host's versions, which silently raises the floor; scripts/test.sh
+# enforces both.
+MACOS_MIN_VERSION=13.3
+GLIBC_MIN_VERSION=2.28
+
+PLATFORMS=darwin-arm64 darwin-amd64 linux-arm64 linux-amd64
+
 HOST_OS=$(shell uname | tr '[:upper:]' '[:lower:]')
 HOST_ARCH=$(shell uname -m | sed -e 's/^x86_64$$/amd64/' -e 's/^aarch64$$/arm64/')
-TARGET_OS=$(HOST_OS)
+TARGET_OS?=$(HOST_OS)
 TARGET_ARCH?=$(HOST_ARCH)
 
-CROSS=$(filter-out $(HOST_ARCH),$(TARGET_ARCH))
-
-GNU_TRIPLE_amd64=x86_64-linux-gnu
-GNU_TRIPLE_arm64=aarch64-linux-gnu
-CC=$(if $(CROSS),$(GNU_TRIPLE_$(TARGET_ARCH))-gcc,gcc)
-
-# The extension imports cgo-backed tree-sitter bindings even when cross-built.
-# macOS clang targets the other architecture with -arch; Linux uses the target
-# GNU cross-compiler, also used for the tree-sitter parser below.
-CLANG_ARCH_amd64=x86_64
-CLANG_ARCH_arm64=arm64
-ifeq ($(HOST_OS),darwin)
-EXT_CC=clang $(if $(CROSS),-arch $(CLANG_ARCH_$(TARGET_ARCH)),)
-else
-EXT_CC=$(CC)
+ifeq ($(filter $(TARGET_OS)-$(TARGET_ARCH),$(PLATFORMS)),)
+$(error unsupported target '$(TARGET_OS)-$(TARGET_ARCH)'; supported: $(PLATFORMS))
+endif
+# macOS packages need the Apple toolchain (clang -arch, ld64). Linux packages
+# build on any host: their C code goes through zig cc (see below).
+ifeq ($(TARGET_OS)-$(HOST_OS),darwin-linux)
+$(error darwin packages must be built on macOS)
 endif
 
 # Rust target-triple naming for rust-analyzer / rustup-init assets.
@@ -50,13 +47,21 @@ RUST_ARCH_arm64=aarch64
 RUST_ARCH=$(RUST_ARCH_$(TARGET_ARCH))
 RUST_OS_darwin=apple-darwin
 RUST_OS_linux=unknown-linux-gnu
-RUST_OS=$(RUST_OS_$(TARGET_OS))
-RUST_TRIPLE=$(RUST_ARCH)-$(RUST_OS)
+RUST_TRIPLE=$(RUST_ARCH)-$(RUST_OS_$(TARGET_OS))
 
-# Cross-arch cargo builds need an explicit linker for the target triple. On
-# macOS the default clang cross-links fine (-arch), so only linux needs this.
+# Linux targets compile and link C through zig cc pinned to the glibc floor, so
+# the result loads on any supported distro regardless of the build host. macOS
+# targets use the host clang; cargo passes -arch for the other macOS arch.
+ZIG_CC=$(CURDIR)/scripts/zig-cc
+ZIG_TARGET=$(RUST_ARCH)-linux-gnu.$(GLIBC_MIN_VERSION)
 RUST_TRIPLE_ENV=$(shell echo $(RUST_TRIPLE) | tr 'a-z-' 'A-Z_')
-CARGO_CROSS_ENV=$(if $(filter linux,$(TARGET_OS)),$(if $(CROSS),CARGO_TARGET_$(RUST_TRIPLE_ENV)_LINKER=$(CC) CC_$(subst -,_,$(RUST_TRIPLE))=$(CC)))
+CARGO_ENV_linux=ZIG_TARGET=$(ZIG_TARGET) CARGO_TARGET_$(RUST_TRIPLE_ENV)_LINKER=$(ZIG_CC) CC_$(subst -,_,$(RUST_TRIPLE))=$(ZIG_CC)
+CARGO_ENV=$(CARGO_ENV_$(TARGET_OS))
+
+# The tree-sitter parser: one universal bundle for both macOS arches.
+PARSER_CC_darwin=cc -bundle -arch arm64 -arch x86_64 -mmacosx-version-min=$(MACOS_MIN_VERSION)
+PARSER_CC_linux=ZIG_TARGET=$(ZIG_TARGET) $(ZIG_CC) -shared -fPIC
+
 RA_PATCHES=$(wildcard patches/*.patch)
 
 # LLVM release asset naming (different per OS).
@@ -69,13 +74,16 @@ LLVM_ASSET=LLVM-$(LLVM_VERSION)-$(LLVM_OSNAME_$(TARGET_OS))-$(LLVM_ARCH_$(TARGET
 
 BLUECTL_CONFIG_ROOT := $(abspath deploy/bluectl)
 
-DIST_TARGETS := \
-	dist-prod-darwin-arm64 dist-prod-darwin-amd64 \
-	dist-prod-linux-arm64  dist-prod-linux-amd64  \
-	dist-staging-darwin-arm64 dist-staging-darwin-amd64 \
-	dist-staging-linux-arm64  dist-staging-linux-amd64
+# Built packages awaiting upload, one per platform: release/rust-<os>-<arch>.tar.gz.
+# `clean` keeps them, since it runs between the builds of release-all.
+RELEASE_DIR=release
 
-.PHONY: $(DIST_TARGETS) clean sign notarize notary-credentials toolchain test pkg
+DIST_TARGETS := $(foreach env,prod staging,$(PLATFORMS:%=dist-$(env)-%))
+DIST_ALL_TARGETS := dist-prod-all dist-staging-all
+RELEASE_TARGETS := $(PLATFORMS:%=release-%)
+
+.PHONY: $(DIST_TARGETS) $(DIST_ALL_TARGETS) $(RELEASE_TARGETS) release-all \
+	check-release-tag clean toolchain test pkg
 default: $(TAR)
 
 pkg: $(PKG_STAMP)
@@ -96,7 +104,7 @@ $(TOOLCHAIN_STAMP): Makefile $(RA_PATCHES)
 	# context for the reverse check: extra local edits near a patched hunk must
 	# not cause an already-applied patch to be applied a second time.
 	git submodule update --init rust-analyzer
-	@cd rust-analyzer && for p in $(PWD)/$(RA_PATCHES); do \
+	@cd rust-analyzer && for p in $(CURDIR)/$(RA_PATCHES); do \
 		if git apply --reverse --check -C0 "$$p" >/dev/null 2>&1; then \
 			echo "already applied: $$p"; \
 		else \
@@ -105,14 +113,12 @@ $(TOOLCHAIN_STAMP): Makefile $(RA_PATCHES)
 		fi; \
 	done
 	rustup target add $(RUST_TRIPLE)
-	cd rust-analyzer && $(CARGO_CROSS_ENV) cargo build --release --target $(RUST_TRIPLE) -p rust-analyzer --bin rust-analyzer
+	cd rust-analyzer && $(CARGO_ENV) cargo build --release --target $(RUST_TRIPLE) -p rust-analyzer --bin rust-analyzer
 	cp rust-analyzer/target/$(RUST_TRIPLE)/release/rust-analyzer pkg/bin/rust-analyzer
 	chmod +x pkg/bin/rust-analyzer
 	# lldb-dap: extract only bin/lldb-dap + the liblldb/libLLVM shared libs it
 	# links from the ~1.5GB prebuilt LLVM tarball. macOS-amd64 has no official
 	# prebuilt (LLVM>19), so it is skipped; Track D handles the runtime fallback.
-	# NOTE: verify the exact extracted lib set + rpath fixups on the build host
-	# (TODO RUNE-257 Track D / M3); paths below match the LLVM-<ver>-* layout.
 	@if [ "$(TARGET_OS)-$(TARGET_ARCH)" = "darwin-amd64" ]; then \
 		echo "skip lldb-dap: no official macOS-amd64 LLVM $(LLVM_VERSION) prebuilt"; \
 	else \
@@ -145,78 +151,69 @@ $(TOOLCHAIN_STAMP): Makefile $(RA_PATCHES)
 	fi
 	@touch $(TOOLCHAIN_STAMP)
 
+# No Developer ID signing or notarization: Rune downloads packages without the
+# quarantine attribute, so Gatekeeper never assesses them, and the linkers
+# already ad-hoc sign arm64 output (the prebuilt downloads come signed).
+# extension_rust is cgo-free, so one go build covers every target.
 $(PKG_STAMP): $(SRC) config.yaml Makefile $(TOOLCHAIN_STAMP)
 	@mkdir -p pkg/bin pkg/lib
-ifeq ($(HOST_OS),darwin)
-	cd tree-sitter-rust && cc -o parser.so -I./src src/*.c -Os -bundle -arch arm64 -arch x86_64
-else
-	cd tree-sitter-rust && $(CC) -o parser.so -I./src src/*.c -Os -shared -fPIC
-endif
+	cd tree-sitter-rust && $(PARSER_CC_$(TARGET_OS)) -o parser.so -I./src src/*.c -Os
 	cp tree-sitter-rust/parser.so pkg/lib/tree-sitter.so
 	cp tree-sitter-rust/queries/highlights.scm tree-sitter-rust/queries/tags.scm pkg/lib
 	cp nvim-treesitter/queries/rust/indents.scm pkg/lib
 	cp nvim-treesitter/queries/rust/locals.scm pkg/lib
 	cp nvim-treesitter/queries/rust/folds.scm pkg/lib
-	cd rune && CGO_ENABLED=1 CC="$(EXT_CC)" GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH) \
-		go build -o $(PWD)/pkg/bin/extension_rust ./cmd/extension_rust
+	cd rune && CGO_ENABLED=0 GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH) \
+		go build -o $(CURDIR)/pkg/bin/extension_rust ./cmd/extension_rust
 	cp config.yaml pkg
 	@touch $(PKG_STAMP)
 
-ifeq ($(UNAME),Darwin)
-sign: $(PKG_STAMP)
-	codesign --force --options runtime --sign "$(CODESIGN_IDENTITY)" pkg/bin/rustup-init
-	codesign --force --options runtime --sign "$(CODESIGN_IDENTITY)" pkg/bin/rust-analyzer
-	codesign --force --options runtime --sign "$(CODESIGN_IDENTITY)" pkg/bin/extension_rust
-	codesign --force --options runtime --sign "$(CODESIGN_IDENTITY)" pkg/lib/tree-sitter.so
-	# lldb-dap + liblldb are absent for darwin-amd64 (no prebuilt LLVM); sign the
-	# dylib before the binary so the binary's rpath ref stays valid.
-	@for f in pkg/lib/liblldb*.dylib pkg/bin/lldb-dap; do \
-		[ -f "$$f" ] && codesign --force --options runtime --sign "$(CODESIGN_IDENTITY)" "$$f" || true; \
-	done
-
-$(NOTARIZE_ZIP): sign
-	zip $(NOTARIZE_ZIP) pkg/bin/rustup-init pkg/bin/rust-analyzer pkg/bin/extension_rust pkg/lib/tree-sitter.so
-	@for f in pkg/bin/lldb-dap pkg/lib/liblldb*.dylib; do \
-		[ -f "$$f" ] && zip $(NOTARIZE_ZIP) "$$f" || true; \
-	done
-
-notarize: $(NOTARIZE_ZIP)
-	xcrun notarytool submit $(NOTARIZE_ZIP) --keychain-profile "$(NOTARY_PROFILE)" --wait
-else
-sign: $(PKG_STAMP)
-	@echo "Skipping codesign (not on macOS)"
-
-notarize: sign
-	@echo "Skipping notarization (not on macOS)"
-endif
-
-$(TAR): $(PKG_STAMP) sign
+$(TAR): $(PKG_STAMP)
 	cd pkg && $(GTAR) --no-xattrs --no-acls -czvf ../$(TAR) .
 
-# Verify release-tarball properties (no .go source leaks, etc).
+# Verify release-tarball properties (no .go source leaks, binaries built for the
+# target os/arch and within the OS floors, etc).
 test: $(TAR)
-	TAR=$(TAR) NOTARIZE_ZIP=$(NOTARIZE_ZIP) ./scripts/test.sh
+	TAR=$(TAR) TARGET_OS=$(TARGET_OS) TARGET_ARCH=$(TARGET_ARCH) \
+		GLIBC_MIN_VERSION=$(GLIBC_MIN_VERSION) MACOS_MIN_VERSION=$(MACOS_MIN_VERSION) \
+		./scripts/test.sh
 
-$(DIST_TARGETS): dist-%:
-	@env=$$(echo $* | cut -d- -f1); \
-	 os=$$(echo $*  | cut -d- -f2); \
-	 arch=$$(echo $* | cut -d- -f3); \
-	 set -e; \
-	 if [ "$$os" != "$(HOST_OS)" ]; then \
-	   echo "error: $@ targets OS '$$os' but host OS is '$(HOST_OS)'; build $$os releases on a $$os machine" >&2; \
-	   exit 1; \
-	 fi; \
-	 $(MAKE) clean; \
-	 $(MAKE) notarize $(TAR) TARGET_ARCH=$$arch; \
-	 BLUECTL_CONFIG_DIR=$(BLUECTL_CONFIG_ROOT)/$$env/$$os-$$arch \
-	 BLUE_TARGET_OS=$$os BLUE_TARGET_ARCH=$$arch ./dist.sh
+# release-<os>-<arch>: clean build + test of one platform's package, moved to
+# $(RELEASE_DIR)/rust-<os>-<arch>.tar.gz. Uploads nothing.
+$(RELEASE_TARGETS): release-%:
+	$(MAKE) clean
+	$(MAKE) test TARGET_OS=$(word 1,$(subst -, ,$*)) TARGET_ARCH=$(word 2,$(subst -, ,$*))
+	@mkdir -p $(RELEASE_DIR)
+	mv $(TAR) $(RELEASE_DIR)/rust-$*.tar.gz
 
-notary-credentials:
-	xcrun notarytool store-credentials "$(NOTARY_PROFILE)" --team-id "YYZRWD888J"
+# Builds every platform's package (darwin needs a macOS host).
+release-all:
+	$(foreach p,$(PLATFORMS),$(MAKE) release-$(p) &&) true
+
+# $(call upload,<env>,<os>-<arch>): upload a package built by release-<os>-<arch>
+# to the bluectl project and bucket pinned by deploy/bluectl/<env>/<os>-<arch>.
+upload = BLUECTL_CONFIG_DIR=$(BLUECTL_CONFIG_ROOT)/$(1)/$(2) \
+	BLUE_TARGET_OS=$(word 1,$(subst -, ,$(2))) BLUE_TARGET_ARCH=$(word 2,$(subst -, ,$(2))) \
+	BLUE_RELEASE_TAR=$(RELEASE_DIR)/rust-$(2).tar.gz ./dist.sh
+
+# dist-<env>-<os>-<arch>: build, test, and upload one platform's package.
+# Pattern stem is <env>-<os>-<arch>, e.g. "prod-darwin-arm64".
+$(DIST_TARGETS): dist-%: check-release-tag
+	$(MAKE) release-$(patsubst $(word 1,$(subst -, ,$*))-%,%,$*)
+	$(call upload,$(word 1,$(subst -, ,$*)),$(patsubst $(word 1,$(subst -, ,$*))-%,%,$*))
+
+# dist-<env>-all: build and test all four packages, then upload them, so a
+# failed build publishes nothing.
+$(DIST_ALL_TARGETS): dist-%-all: check-release-tag
+	$(MAKE) release-all
+	$(foreach p,$(PLATFORMS),$(call upload,$*,$(p)) &&) true
+
+check-release-tag:
+	@./check-release-tag.sh
 
 clean:
 	rm -rf $(TAR)
-	rm -rf $(NOTARIZE_ZIP)
 	rm -rf $(PKG_STAMP) .toolchain.*.stamp
 	rm -rf pkg/
 	rm -rf llvm.tar.xz llvm-extract
+	rm -f tree-sitter-rust/parser.so

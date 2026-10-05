@@ -11,42 +11,33 @@ This repo builds the Rune Rust language package (`rust.tar.gz`) and publishes it
 [`bluectl`](https://github.com/unstablebuild/blue). Releases cover macOS (`darwin`) and
 Linux, each on `arm64` and `amd64`, in `staging` and `prod`.
 
-1. **Prepare the build host.** Build macOS artifacts on macOS and Linux
-   artifacts on Linux; cross-architecture builds on the same OS are supported.
-   Install Go, a Rust toolchain recent enough for the pinned rust-analyzer,
-   `rustup`, a C compiler, `wget`, `bluectl`, and tar (GNU `gtar` on macOS).
-   Linux cross-architecture builds also need the target GNU cross-compiler
-   (`aarch64-linux-gnu-gcc` or `x86_64-linux-gnu-gcc`). macOS releases need
-   the configured Developer ID signing identity and a notarytool profile
-   (`make notary-credentials` to set it up).
+1. **Prepare the build host.** A Mac builds all four packages: macOS ones with
+   the Xcode command line tools, Linux ones with `zig cc` pinned to glibc 2.28
+   (a Linux host can build only the Linux packages). Install Go, a Rust
+   toolchain recent enough for the pinned rust-analyzer, `rustup`, `zig`,
+   `wget`, `bluectl`, and tar (GNU `gtar` on macOS). Packages are not signed
+   with a Developer ID or notarized: Rune downloads them without the quarantine
+   attribute, so Gatekeeper never assesses them.
 2. **Prepare the release.** Fetch tags and submodules
    (`git fetch --tags && git submodule update --init --recursive`), then check
-   out the intended release tag. Make sure `bluectl` can authenticate (the
-   configs under `deploy/bluectl/` use your gcloud Application Default
-   Credentials). Set `BLUE_PGP_KEY` and `BLUE_PGP_KEYRING` for upload; see
+   out the intended release tag; the `dist-*` targets refuse a dirty or
+   untagged tree. Make sure `bluectl` can authenticate (the configs under
+   `deploy/bluectl/` use your gcloud Application Default Credentials). Set
+   `BLUE_PGP_KEY` and `BLUE_PGP_KEYRING` for upload; see
    `bluectl release upload -h` for their expected values.
-3. **Build and check each artifact before publishing** on its OS, substituting
-   `arm64` or `amd64`:
+3. **Publish** every platform, or a single one:
 
    ```sh
-   make clean
-   make notarize rust.tar.gz TARGET_ARCH=arm64
-   make test TARGET_ARCH=arm64
+   make dist-prod-all                 # all four packages
+   make dist-staging-linux-arm64      # one package
    ```
 
-4. **Publish** using the matching environment, OS, and architecture target:
+   `dist-<env>-all` builds and tests all four packages before uploading any of
+   them. `dist-<env>-<os>-<arch>` builds, tests, and uploads one. The target
+   selects the pinned project and per-platform release bucket from
+   `deploy/bluectl/`; do not run `dist.sh` directly.
 
-   ```sh
-   make dist-staging-darwin-arm64   # on macOS
-   make dist-prod-darwin-amd64      # on macOS
-   make dist-staging-linux-arm64    # on Linux
-   make dist-prod-linux-amd64       # on Linux
-   ```
-
-   All `staging`/`prod` × `darwin`/`linux` × `arm64`/`amd64` combinations
-   follow this naming pattern. Each target cleans, rebuilds, signs/notarizes
-   on macOS, and uploads the tarball via `dist.sh`. The target selects the
-   pinned project and per-platform release bucket from `deploy/bluectl/`;
-   do not run `dist.sh` directly. Repeat the build/check for the other arch
-   before its upload. The `darwin-amd64` package currently omits `lldb-dap`
-   because LLVM 22 has no official macOS x86_64 prebuilt.
+   To build without uploading, run `make release-all` or
+   `make release-<os>-<arch>`; packages land in
+   `release/rust-<os>-<arch>.tar.gz`. The `darwin-amd64` package omits
+   `lldb-dap` because LLVM 22 has no official macOS x86_64 prebuilt.
