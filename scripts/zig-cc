@@ -2,12 +2,23 @@
 # C compiler and linker for Linux targets: zig cc against the glibc named in
 # ZIG_TARGET (e.g. aarch64-linux-gnu.2.28), so binaries load on the oldest
 # supported glibc whatever the build host runs, and Linux packages can be
-# cross-built from macOS. Cargo takes a linker path, not a command line, hence
-# this wrapper.
+# cross-built from macOS. Cargo and CMake take tool paths, not command lines,
+# hence this wrapper. Invoked through the zig-c++, zig-ar and zig-ranlib
+# symlinks it runs the matching zig subcommand (C++ links libc++ statically).
 set -e
-: "${ZIG_TARGET:?ZIG_TARGET is not set (e.g. aarch64-linux-gnu.2.28)}"
 if ! command -v zig >/dev/null 2>&1; then
 	echo "zig-cc: zig not found on PATH; Linux packages are built with zig cc" >&2
 	exit 127
 fi
-exec zig cc -target "$ZIG_TARGET" "$@"
+# zig's linker keeps every input archive open; linking liblldb exceeds macOS's
+# default soft limit of 256 open files (ProcessFdQuotaExceeded).
+ulimit -n 10240 2>/dev/null || :
+case "$(basename "$0")" in
+zig-ar) exec zig ar "$@" ;;
+zig-ranlib) exec zig ranlib "$@" ;;
+esac
+: "${ZIG_TARGET:?ZIG_TARGET is not set (e.g. aarch64-linux-gnu.2.28)}"
+case "$(basename "$0")" in
+zig-c++) exec zig c++ -target "$ZIG_TARGET" "$@" ;;
+*) exec zig cc -target "$ZIG_TARGET" "$@" ;;
+esac

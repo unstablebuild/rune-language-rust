@@ -13,11 +13,16 @@
 #      lib/, which holds package symlinks, not dylibs) and collides with
 #      rune-language-zig's lldb-dap; and lldb-dap has no connect:// scheme.
 #   3. The packaged lldb-dap actually runs from the bin/ + lib/ layout, when
-#      the host can execute the target's binaries.
+#      the host can execute the target's binaries. On Linux, lldb-server ships
+#      next to it: liblldb launches debuggees through lib/../bin/lldb-server.
 #   4. Every native binary is built for $TARGET_OS/$TARGET_ARCH and loads on
 #      the oldest supported OS ($GLIBC_MIN_VERSION, macOS $MACOS_MIN_VERSION).
 #      One host builds all four packages, so this also catches a package
 #      about to be uploaded to the wrong platform's bucket.
+#   5. Every native binary links only libraries the OS always provides (glibc
+#      and libgcc_s; /usr/lib and system frameworks) or liblldb, so nothing
+#      depends on an optional package such as libpython or libxml2, or on a
+#      library from the build host such as Homebrew's.
 set -euo pipefail
 
 TAR="${TAR:-rust.tar.gz}"
@@ -56,12 +61,18 @@ if ! grep -qF '$RUNE_DATADIR/lib/$RUNE_PKG_ID/bin/lldb-dap --connection listen:/
 fi
 echo "ok: debugger command uses the package-local lldb-dap and listen://{addr}"
 
-# lldb-dap ships everywhere except darwin-amd64 (no official LLVM prebuilt).
-# It can only be run when the host matches the target (Linux packages are
-# cross-built on macOS).
+for f in bin/lldb-dap $([ "$TARGET_OS" = linux ] && echo bin/lldb-server); do
+	if [ ! -x "$workdir/$f" ]; then
+		echo "error: $TAR is missing $f" >&2
+		exit 1
+	fi
+done
+
+# lldb-dap can only be run when the host matches the target (Linux packages
+# are cross-built on macOS).
 host_os="$(uname | tr '[:upper:]' '[:lower:]')"
 host_arch="$(uname -m | sed -e 's/^x86_64$/amd64/' -e 's/^aarch64$/arm64/')"
-if [ -f "$workdir/bin/lldb-dap" ] && [ "$host_os-$host_arch" = "$TARGET_OS-$TARGET_ARCH" ]; then
+if [ "$host_os-$host_arch" = "$TARGET_OS-$TARGET_ARCH" ]; then
 	if ! "$workdir/bin/lldb-dap" --help > /dev/null 2>&1; then
 		echo "error: packaged lldb-dap cannot run from its package layout" >&2
 		"$workdir/bin/lldb-dap" --help >&2 || true
@@ -108,14 +119,6 @@ while IFS= read -r -d '' f; do
 		continue
 		;;
 	esac
-	# The prebuilt LLVM lldb-dap needs a newer OS than Rune supports (glibc
-	# 2.34 + libpython3.11 on Linux, macOS 14). Known gap; report, don't fail.
-	case "$name" in
-	bin/lldb-dap | lib/liblldb.* | lib/libLLVM.*)
-		echo "warning: $name is a prebuilt LLVM binary; not checked against the OS floor"
-		continue
-		;;
-	esac
 	if [ "$TARGET_OS" = linux ]; then
 		need="$(objdump -T "$f" 2>/dev/null |
 			sed -n 's/.*GLIBC_\([0-9][0-9.]*\).*/\1/p' |
@@ -124,6 +127,7 @@ while IFS= read -r -d '' f; do
 			echo "error: $name requires GLIBC_$need; the floor is $GLIBC_MIN_VERSION" >&2
 			failed=1
 		fi
+		deps="$(objdump -p "$f" | awk '$1 == "NEEDED" { print $2 }')"
 	else
 		# Minimum macOS of every architecture slice, from LC_BUILD_VERSION
 		# (minos) or the older LC_VERSION_MIN_MACOSX (version).
@@ -141,7 +145,20 @@ while IFS= read -r -d '' f; do
 				failed=1
 			fi
 		done
+		# otool -L prints the file name, and per-slice headers ending in ':'.
+		deps="$(otool -arch all -L "$f" | awk 'NR > 1 && $NF !~ /:$/ { print $1 }')"
 	fi
+	for dep in $deps; do
+		case "$dep" in
+		libc.so.6 | libm.so.6 | libpthread.so.0 | libdl.so.2 | librt.so.1 | \
+			libutil.so.1 | libgcc_s.so.1 | ld-linux-*.so.* | liblldb.so.*) ;;
+		/usr/lib/* | /System/Library/* | @rpath/liblldb.*) ;;
+		*)
+			echo "error: $name links $dep, which the OS does not always provide" >&2
+			failed=1
+			;;
+		esac
+	done
 done < <(find "$workdir" -type f -print0)
 
 if [ "$binaries" -eq 0 ]; then
@@ -151,4 +168,4 @@ fi
 if [ "$failed" -ne 0 ]; then
 	exit 1
 fi
-echo "ok: $binaries binaries are $TARGET_OS-$TARGET_ARCH and within the OS floors (glibc $GLIBC_MIN_VERSION, macOS $MACOS_MIN_VERSION)"
+echo "ok: $binaries binaries are $TARGET_OS-$TARGET_ARCH, within the OS floors (glibc $GLIBC_MIN_VERSION, macOS $MACOS_MIN_VERSION), and link only system libraries"

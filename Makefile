@@ -4,7 +4,6 @@ TOOLCHAIN_STAMP=.toolchain.$(TARGET_OS)-$(TARGET_ARCH).stamp
 TAR=rust.tar.gz
 UNAME=$(shell uname)
 GTAR=$(if $(filter Darwin,$(UNAME)),gtar,tar)
-TAR_WILDCARDS=$(if $(filter Darwin,$(UNAME)),,--wildcards)
 
 # Pinned prebuilt toolchain versions (downloaded per target os/arch). No Rust
 # toolchain is bundled; rustup provisions it on first run, confined to
@@ -14,9 +13,8 @@ TAR_WILDCARDS=$(if $(filter Darwin,$(UNAME)),,--wildcards)
 # upstream prebuilts lack fixes we depend on. This means the build host needs a
 # cargo/rustc >= the submodule's rust-version, plus the target std via
 # `rustup target add`.
-# lldb-dap is extracted from the official prebuilt LLVM release. macOS x86_64
-# prebuilts stopped at LLVM 19, so darwin-amd64 lldb-dap is intentionally NOT
-# staged here (see toolchain target); arm64 macOS + both linux arches are.
+# lldb-dap is built from the LLVM source release by scripts/build-lldb.sh (see
+# there for why not the prebuilt release binaries). It needs cmake and ninja.
 LLVM_VERSION=22.1.8
 
 # Oldest supported platforms (docs.rune.build Prerequisites). Toolchains default
@@ -64,13 +62,12 @@ PARSER_CC_linux=ZIG_TARGET=$(ZIG_TARGET) $(ZIG_CC) -shared -fPIC
 
 RA_PATCHES=$(wildcard patches/*.patch)
 
-# LLVM release asset naming (different per OS).
-LLVM_ARCH_amd64_linux=X64
-LLVM_ARCH_arm64_linux=ARM64
-LLVM_ARCH_arm64_darwin=ARM64
-LLVM_OSNAME_darwin=macOS
-LLVM_OSNAME_linux=Linux
-LLVM_ASSET=LLVM-$(LLVM_VERSION)-$(LLVM_OSNAME_$(TARGET_OS))-$(LLVM_ARCH_$(TARGET_ARCH)_$(TARGET_OS)).tar.xz
+# LLDB source and build trees (several GB) and the installed lldb-dap per
+# platform. A platform builds once per LLVM_VERSION: `clean` keeps this
+# directory, `clean-lldb` removes it.
+LLDB_WORK=lldb
+LLDB_PREFIX=$(LLDB_WORK)/$(LLVM_VERSION)/$(TARGET_OS)-$(TARGET_ARCH)
+LLDB_STAMP=$(LLDB_PREFIX)/.stamp
 
 BLUECTL_CONFIG_ROOT := $(abspath deploy/bluectl)
 
@@ -83,17 +80,25 @@ DIST_ALL_TARGETS := dist-prod-all dist-staging-all
 RELEASE_TARGETS := $(PLATFORMS:%=release-%)
 
 .PHONY: $(DIST_TARGETS) $(DIST_ALL_TARGETS) $(RELEASE_TARGETS) release-all \
-	check-release-tag clean toolchain test pkg
+	check-release-tag clean clean-lldb lldb toolchain test pkg
 default: $(TAR)
 
 pkg: $(PKG_STAMP)
 
 toolchain: $(TOOLCHAIN_STAMP)
 
+lldb: $(LLDB_STAMP)
+
+$(LLDB_STAMP): scripts/build-lldb.sh
+	LLVM_VERSION=$(LLVM_VERSION) LLDB_WORK=$(LLDB_WORK) \
+		MACOS_MIN_VERSION=$(MACOS_MIN_VERSION) GLIBC_MIN_VERSION=$(GLIBC_MIN_VERSION) \
+		./scripts/build-lldb.sh $(TARGET_OS) $(TARGET_ARCH) $(LLDB_PREFIX)
+	@touch $@
+
 # Stage prebuilt rustup-init into pkg/bin, build our patched rust-analyzer, and
-# extract lldb-dap (+ its lldb/LLVM shared libs) from the prebuilt LLVM release
-# into pkg/bin + pkg/lib, for the target os/arch.
-$(TOOLCHAIN_STAMP): Makefile $(RA_PATCHES)
+# stage lldb-dap (+ liblldb, and lldb-server on Linux) into pkg/bin + pkg/lib,
+# for the target os/arch.
+$(TOOLCHAIN_STAMP): Makefile $(RA_PATCHES) $(LLDB_STAMP)
 	@mkdir -p pkg/bin pkg/lib
 	# rustup-init (single static binary; the extension runs it on first launch).
 	wget -O pkg/bin/rustup-init https://static.rust-lang.org/rustup/dist/$(RUST_TRIPLE)/rustup-init
@@ -116,44 +121,16 @@ $(TOOLCHAIN_STAMP): Makefile $(RA_PATCHES)
 	cd rust-analyzer && $(CARGO_ENV) cargo build --release --target $(RUST_TRIPLE) -p rust-analyzer --bin rust-analyzer
 	cp rust-analyzer/target/$(RUST_TRIPLE)/release/rust-analyzer pkg/bin/rust-analyzer
 	chmod +x pkg/bin/rust-analyzer
-	# lldb-dap: extract only bin/lldb-dap + the liblldb/libLLVM shared libs it
-	# links from the ~1.5GB prebuilt LLVM tarball. macOS-amd64 has no official
-	# prebuilt (LLVM>19), so it is skipped; Track D handles the runtime fallback.
-	@if [ "$(TARGET_OS)-$(TARGET_ARCH)" = "darwin-amd64" ]; then \
-		echo "skip lldb-dap: no official macOS-amd64 LLVM $(LLVM_VERSION) prebuilt"; \
-	else \
-		wget -O llvm.tar.xz https://github.com/llvm/llvm-project/releases/download/llvmorg-$(LLVM_VERSION)/$(LLVM_ASSET); \
-		rm -rf llvm-extract; \
-		mkdir -p llvm-extract; \
-		: "Extract only lldb-dap + the lldb/LLVM shared libs it links. Verified"; \
-		: "on macOS arm64 (LLVM 22.1.8): lldb-dap needs ONLY @rpath/liblldb.<ver>.dylib,"; \
-		: "its rpath is @loader_path/../lib (== our bin/+lib/ layout, no fixup), and"; \
-		: "liblldb is self-contained (no separate libLLVM runtime dylib). Match only"; \
-		: "the runtime shared objects (liblldb.* / libLLVM.so*); never the build-time"; \
-		: "static .a archives, which lldb-dap does not load and which would bloat the"; \
-		: "package by hundreds of MB."; \
-		: "lldb-dap must extract (fail the build if absent); the lib patterns are"; \
-		: "OS-specific, so run each in its own tar tolerant of a no-match (tar errors"; \
-		: "when a pattern matches nothing)."; \
-		tar -xJf llvm.tar.xz $(TAR_WILDCARDS) -C llvm-extract --strip-components=1 '*/bin/lldb-dap'; \
-		if [ "$(TARGET_OS)" = "darwin" ]; then \
-			tar -xJf llvm.tar.xz $(TAR_WILDCARDS) -C llvm-extract --strip-components=1 '*/lib/liblldb.*dylib' 2>/dev/null || true; \
-		else \
-			tar -xJf llvm.tar.xz $(TAR_WILDCARDS) -C llvm-extract --strip-components=1 '*/lib/liblldb.so*' 2>/dev/null || true; \
-			tar -xJf llvm.tar.xz $(TAR_WILDCARDS) -C llvm-extract --strip-components=1 '*/lib/libLLVM.so*' 2>/dev/null || true; \
-		fi; \
-		cp llvm-extract/bin/lldb-dap pkg/bin/lldb-dap; \
-		cp -a llvm-extract/lib/liblldb.*dylib pkg/lib/ 2>/dev/null || true; \
-		cp -a llvm-extract/lib/liblldb.so* pkg/lib/ 2>/dev/null || true; \
-		cp -a llvm-extract/lib/libLLVM.so* pkg/lib/ 2>/dev/null || true; \
-		chmod +x pkg/bin/lldb-dap; \
-		rm -rf llvm.tar.xz llvm-extract; \
-	fi
+	# lldb-dap finds liblldb through its @loader_path/../lib ($$ORIGIN/../lib)
+	# rpath, and liblldb finds lldb-server in lib/../bin: the package's bin/ +
+	# lib/ layout. macOS debuggees run under the system debugserver instead.
+	cp $(LLDB_PREFIX)/bin/* pkg/bin/
+	cp -a $(LLDB_PREFIX)/lib/liblldb* pkg/lib/
 	@touch $(TOOLCHAIN_STAMP)
 
 # No Developer ID signing or notarization: Rune downloads packages without the
 # quarantine attribute, so Gatekeeper never assesses them, and the linkers
-# already ad-hoc sign arm64 output (the prebuilt downloads come signed).
+# already ad-hoc sign arm64 output (the prebuilt rustup-init comes signed).
 # extension_rust is cgo-free, so one go build covers every target.
 $(PKG_STAMP): $(SRC) config.yaml Makefile $(TOOLCHAIN_STAMP)
 	@mkdir -p pkg/bin pkg/lib
@@ -215,5 +192,7 @@ clean:
 	rm -rf $(TAR)
 	rm -rf $(PKG_STAMP) .toolchain.*.stamp
 	rm -rf pkg/
-	rm -rf llvm.tar.xz llvm-extract
 	rm -f tree-sitter-rust/parser.so
+
+clean-lldb:
+	rm -rf $(LLDB_WORK)

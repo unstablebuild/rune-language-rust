@@ -5,5 +5,5 @@
 .pkg.stamp
 .toolchain.*.stamp
 pkg/
-llvm.tar.xz
 release/
+lldb/
