@@ -1,9 +1,21 @@
 SRC=tree-sitter-rust nvim-treesitter rune
 PKG_STAMP=.pkg.stamp
+SIGN_STAMP=.sign.stamp
 TOOLCHAIN_STAMP=.toolchain.$(TARGET_OS)-$(TARGET_ARCH).stamp
 TAR=rust.tar.gz
 UNAME=$(shell uname)
 GTAR=$(if $(filter Darwin,$(UNAME)),gtar,tar)
+
+# Rune runs with the hardened runtime and library validation, so macOS only
+# lets it dlopen a tree-sitter.so signed by Rune's own team; an ad-hoc signed
+# one fails with "different Team IDs". scripts/macos-signing.sh signs the
+# macOS packages, and scripts/test.sh runs its check. Packages are not
+# notarized: Rune installs them without the quarantine attribute, so
+# Gatekeeper never assesses them.
+TEAM_ID=YYZRWD888J
+CODESIGN_IDENTITY=Developer ID Application: Unstable Build, LLC. ($(TEAM_ID))
+MACOS_SIGNING=TEAM_ID=$(TEAM_ID) CODESIGN_IDENTITY="$(CODESIGN_IDENTITY)" \
+	TARGET_ARCH=$(TARGET_ARCH) ./scripts/macos-signing.sh
 
 # Pinned prebuilt toolchain versions (downloaded per target os/arch). No Rust
 # toolchain is bundled; rustup provisions it on first run, confined to
@@ -36,7 +48,7 @@ endif
 # macOS packages need the Apple toolchain (clang -arch, ld64). Linux packages
 # build on any host: their C code goes through zig cc (see below).
 ifeq ($(TARGET_OS)-$(HOST_OS),darwin-linux)
-$(error darwin packages must be built on macOS)
+$(error darwin packages must be built and signed on macOS)
 endif
 
 # Rust target-triple naming for rust-analyzer / rustup-init assets.
@@ -78,9 +90,10 @@ RELEASE_DIR=release
 DIST_TARGETS := $(foreach env,prod staging,$(PLATFORMS:%=dist-$(env)-%))
 DIST_ALL_TARGETS := dist-prod-all dist-staging-all
 RELEASE_TARGETS := $(PLATFORMS:%=release-%)
+DARWIN_RELEASE_TARGETS := $(filter release-darwin-%,$(RELEASE_TARGETS))
 
 .PHONY: $(DIST_TARGETS) $(DIST_ALL_TARGETS) $(RELEASE_TARGETS) release-all \
-	check-release-tag clean clean-lldb lldb toolchain test pkg
+	check-release-tag check-macos-host clean clean-lldb lldb toolchain test pkg
 default: $(TAR)
 
 pkg: $(PKG_STAMP)
@@ -128,9 +141,6 @@ $(TOOLCHAIN_STAMP): Makefile $(RA_PATCHES) $(LLDB_STAMP)
 	cp -a $(LLDB_PREFIX)/lib/liblldb* pkg/lib/
 	@touch $(TOOLCHAIN_STAMP)
 
-# No Developer ID signing or notarization: Rune downloads packages without the
-# quarantine attribute, so Gatekeeper never assesses them, and the linkers
-# already ad-hoc sign arm64 output (the prebuilt rustup-init comes signed).
 # extension_rust is cgo-free, so one go build covers every target.
 $(PKG_STAMP): $(SRC) config.yaml Makefile $(TOOLCHAIN_STAMP)
 	@mkdir -p pkg/bin pkg/lib
@@ -145,13 +155,24 @@ $(PKG_STAMP): $(SRC) config.yaml Makefile $(TOOLCHAIN_STAMP)
 	cp config.yaml pkg
 	@touch $(PKG_STAMP)
 
-$(TAR): $(PKG_STAMP)
+# macOS packages: sign every Mach-O file in pkg/ with the Developer ID. This
+# replaces the linkers' ad-hoc signatures and the vendor signature on
+# rustup-init.
+$(SIGN_STAMP): $(PKG_STAMP)
+	$(MACOS_SIGNING) sign pkg
+	@touch $@
+
+SIGN_darwin=$(SIGN_STAMP)
+
+$(TAR): $(PKG_STAMP) $(SIGN_$(TARGET_OS))
 	cd pkg && $(GTAR) --no-xattrs --no-acls -czvf ../$(TAR) .
 
 # Verify release-tarball properties (no .go source leaks, binaries built for the
-# target os/arch and within the OS floors, etc).
+# target os/arch and within the OS floors, macOS packages loadable by Rune.app,
+# etc).
 test: $(TAR)
-	TAR=$(TAR) TARGET_OS=$(TARGET_OS) TARGET_ARCH=$(TARGET_ARCH) \
+	TAR=$(TAR) TEAM_ID=$(TEAM_ID) CODESIGN_IDENTITY="$(CODESIGN_IDENTITY)" \
+		TARGET_OS=$(TARGET_OS) TARGET_ARCH=$(TARGET_ARCH) \
 		GLIBC_MIN_VERSION=$(GLIBC_MIN_VERSION) MACOS_MIN_VERSION=$(MACOS_MIN_VERSION) \
 		./scripts/test.sh
 
@@ -163,8 +184,12 @@ $(RELEASE_TARGETS): release-%:
 	@mkdir -p $(RELEASE_DIR)
 	mv $(TAR) $(RELEASE_DIR)/rust-$*.tar.gz
 
-# Builds every platform's package (darwin needs a macOS host).
-release-all:
+# Fail before building if this host cannot sign.
+$(DARWIN_RELEASE_TARGETS): check-macos-host
+
+# Builds every platform's package. Only macOS can sign the darwin ones, so on
+# Linux this fails before building anything.
+release-all: check-macos-host
 	$(foreach p,$(PLATFORMS),$(MAKE) release-$(p) &&) true
 
 # $(call upload,<env>,<os>-<arch>): upload a package built by release-<os>-<arch>
@@ -180,17 +205,21 @@ $(DIST_TARGETS): dist-%: check-release-tag
 	$(call upload,$(word 1,$(subst -, ,$*)),$(patsubst $(word 1,$(subst -, ,$*))-%,%,$*))
 
 # dist-<env>-all: build and test all four packages, then upload them, so a
-# failed build publishes nothing.
-$(DIST_ALL_TARGETS): dist-%-all: check-release-tag
+# failed build publishes nothing. Fails on a Linux host (see release-all).
+$(DIST_ALL_TARGETS): dist-%-all: check-macos-host check-release-tag
 	$(MAKE) release-all
 	$(foreach p,$(PLATFORMS),$(call upload,$*,$(p)) &&) true
 
 check-release-tag:
 	@./check-release-tag.sh
 
+# macOS host and the Developer ID identity in the keychain.
+check-macos-host:
+	@$(MACOS_SIGNING) preflight
+
 clean:
 	rm -rf $(TAR)
-	rm -rf $(PKG_STAMP) .toolchain.*.stamp
+	rm -rf $(PKG_STAMP) $(SIGN_STAMP) .toolchain.*.stamp
 	rm -rf pkg/
 	rm -f tree-sitter-rust/parser.so
 

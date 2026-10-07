@@ -3,6 +3,7 @@
 *.swp
 *.rswp
 .pkg.stamp
+.sign.stamp
 .toolchain.*.stamp
 pkg/
 release/
