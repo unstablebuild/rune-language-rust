@@ -23,6 +23,9 @@
 #      and libgcc_s; /usr/lib and system frameworks) or liblldb, so nothing
 #      depends on an optional package such as libpython or libxml2, or on a
 #      library from the build host such as Homebrew's.
+#   6. macOS targets: Rune.app can load the package. Every Mach-O file is
+#      signed by the $TEAM_ID Developer ID, and tree-sitter.so loads into a
+#      process signed like Rune.app (scripts/macos-signing.sh check).
 set -euo pipefail
 
 TAR="${TAR:-rust.tar.gz}"
@@ -30,6 +33,10 @@ TAR="${TAR:-rust.tar.gz}"
 : "${TARGET_ARCH:?TARGET_ARCH is not set; run 'make test'}"
 : "${GLIBC_MIN_VERSION:?GLIBC_MIN_VERSION is not set; run 'make test'}"
 : "${MACOS_MIN_VERSION:?MACOS_MIN_VERSION is not set; run 'make test'}"
+if [ "$TARGET_OS" = darwin ]; then
+	: "${TEAM_ID:?TEAM_ID is not set; run 'make test'}"
+	: "${CODESIGN_IDENTITY:?CODESIGN_IDENTITY is not set; run 'make test'}"
+fi
 
 if [ ! -f "$TAR" ]; then
 	echo "error: $TAR not found; run 'make' first" >&2
@@ -169,3 +176,8 @@ if [ "$failed" -ne 0 ]; then
 	exit 1
 fi
 echo "ok: $binaries binaries are $TARGET_OS-$TARGET_ARCH, within the OS floors (glibc $GLIBC_MIN_VERSION, macOS $MACOS_MIN_VERSION), and link only system libraries"
+
+# Guard 6.
+if [ "$TARGET_OS" = darwin ]; then
+	"$(dirname "$0")/macos-signing.sh" check "$workdir" tree_sitter_rust
+fi

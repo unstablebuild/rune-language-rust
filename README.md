@@ -13,11 +13,20 @@ Linux, each on `arm64` and `amd64`, in `staging` and `prod`.
 
 1. **Prepare the build host.** A Mac builds all four packages: macOS ones with
    the Xcode command line tools, Linux ones with `zig cc` pinned to glibc 2.28
-   (a Linux host can build only the Linux packages). Install Go, a Rust
-   toolchain recent enough for the pinned rust-analyzer, `rustup`, `zig`,
-   `cmake`, `ninja`, `wget`, `bluectl`, and tar (GNU `gtar` on macOS). Packages
-   are not signed with a Developer ID or notarized: Rune downloads them without
-   the quarantine attribute, so Gatekeeper never assesses them.
+   (a Linux host can build only the Linux packages, so `release-all` and
+   `dist-<env>-all` fail there). Install Go, a Rust toolchain recent enough for
+   the pinned rust-analyzer, `rustup`, `zig`, `cmake`, `ninja`, `wget`,
+   `bluectl`, and tar (GNU `gtar` on macOS).
+
+   macOS packages are signed with the Unstable Build Developer ID, so the Mac
+   needs the "Developer ID Application: Unstable Build, LLC. (YYZRWD888J)"
+   identity in its keychain. The signature is required, not optional: Rune
+   runs with library validation, so it only loads a `tree-sitter.so` signed by
+   its own team. `make test` fails a macOS package unless every Mach-O file is
+   signed by that team and `tree-sitter.so` loads into a process signed like
+   Rune.app (`scripts/macos-signing.sh`, shared by every language repo).
+   Packages are not notarized: Rune installs them without the quarantine
+   attribute, so Gatekeeper never assesses them.
 
    `lldb-dap` (and `lldb-server` on Linux) is built from the LLVM source
    release by `scripts/build-lldb.sh`, with no Python, libxml2, curses or
@@ -40,9 +49,9 @@ Linux, each on `arm64` and `amd64`, in `staging` and `prod`.
    ```
 
    `dist-<env>-all` builds and tests all four packages before uploading any of
-   them. `dist-<env>-<os>-<arch>` builds, tests, and uploads one. The target
-   selects the pinned project and per-platform release bucket from
-   `deploy/bluectl/`; do not run `dist.sh` directly.
+   them. `dist-<env>-<os>-<arch>` does the same for one package and uploads
+   it. The target selects the pinned project and per-platform release bucket
+   from `deploy/bluectl/`; do not run `dist.sh` directly.
 
    To build without uploading, run `make release-all` or
    `make release-<os>-<arch>`; packages land in
