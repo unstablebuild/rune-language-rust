@@ -18,13 +18,15 @@ Linux, each on `arm64` and `amd64`, in `staging` and `prod`.
    the pinned rust-analyzer, `rustup`, `zig`, `cmake`, `ninja`, `wget`,
    `bluectl`, and tar (GNU `gtar` on macOS).
 
-   macOS packages are signed with the Unstable Build Developer ID, so the Mac
-   needs the "Developer ID Application: Unstable Build, LLC. (YYZRWD888J)"
-   identity in its keychain. The signature is required, not optional: Rune
-   runs with library validation, so it only loads a `tree-sitter.so` signed by
-   its own team. `make test` fails a macOS package unless every Mach-O file is
-   signed by that team and `tree-sitter.so` loads into a process signed like
-   Rune.app (`scripts/macos-signing.sh`, shared by every language repo).
+   The macOS `tree-sitter.so` is signed with the Unstable Build Developer ID,
+   so the Mac needs the "Developer ID Application: Unstable Build, LLC.
+   (YYZRWD888J)" identity in its keychain. The signature is required, not
+   optional: Rune runs with library validation, so it only loads a
+   `tree-sitter.so` signed by its own team. The other binaries run as separate
+   processes and keep their linker or vendor signatures. `make test` fails a
+   macOS package unless `tree-sitter.so` is signed by that team and loads into
+   a process signed like Rune.app, and every binary is intact and validly
+   signed (`scripts/macos-signing.sh`, shared by every language repo).
    Packages are not notarized: Rune installs them without the quarantine
    attribute, so Gatekeeper never assesses them.
 

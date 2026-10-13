@@ -155,9 +155,9 @@ $(PKG_STAMP): $(SRC) config.yaml Makefile $(TOOLCHAIN_STAMP)
 	cp config.yaml pkg
 	@touch $(PKG_STAMP)
 
-# macOS packages: sign every Mach-O file in pkg/ with the Developer ID. This
-# replaces the linkers' ad-hoc signatures and the vendor signature on
-# rustup-init.
+# macOS packages: sign tree-sitter.so, the one file Rune loads into its own
+# process, with the Developer ID. The other binaries keep the signatures their
+# linker or vendor gave them (see scripts/macos-signing.sh).
 $(SIGN_STAMP): $(PKG_STAMP)
 	$(MACOS_SIGNING) sign pkg
 	@touch $@
