@@ -141,7 +141,9 @@ $(TOOLCHAIN_STAMP): Makefile $(RA_PATCHES) $(LLDB_STAMP)
 	cp -a $(LLDB_PREFIX)/lib/liblldb* pkg/lib/
 	@touch $(TOOLCHAIN_STAMP)
 
-# extension_rust is cgo-free, so one go build covers every target.
+# extension_rust is cgo-free, so one go build covers every target. debug.Tag
+# is the version Rune shows when asking to run the extension; it matches the
+# tag dist.sh uploads as.
 $(PKG_STAMP): $(SRC) config.yaml Makefile $(TOOLCHAIN_STAMP)
 	@mkdir -p pkg/bin pkg/lib
 	cd tree-sitter-rust && $(PARSER_CC_$(TARGET_OS)) -o parser.so -I./src src/*.c -Os
@@ -151,7 +153,8 @@ $(PKG_STAMP): $(SRC) config.yaml Makefile $(TOOLCHAIN_STAMP)
 	cp nvim-treesitter/queries/rust/locals.scm pkg/lib
 	cp nvim-treesitter/queries/rust/folds.scm pkg/lib
 	cd rune && CGO_ENABLED=0 GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH) \
-		go build -o $(CURDIR)/pkg/bin/extension_rust ./cmd/extension_rust
+		go build -ldflags="-X unstable.build/rune/internal/debug.Tag=$(shell git describe --tags --dirty)" \
+		-o $(CURDIR)/pkg/bin/extension_rust ./cmd/extension_rust
 	cp config.yaml pkg
 	@touch $(PKG_STAMP)
 
